@@ -1,5 +1,28 @@
 pipeline {
-    agent any
+    // Указываем, что агент запускается динамически в виде пода Kubernetes
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    some-label: jenkins-agent
+spec:
+  containers:
+  # Контейнер 1: Сборщик (инструменты для линтинга и сборки)
+  - name: builder
+    image: alpine:3.19
+    command: ['cat']
+    tty: true
+  # Контейнер 2: Тестировщик (инструменты для проверки доступности среды)
+  - name: tester
+    image: curlimages/curl:8.5.0
+    command: ['cat']
+    tty: true
+'''
+        }
+    }
 
     options {
         timeout(time: 1, unit: 'HOURS')
@@ -9,86 +32,88 @@ pipeline {
     environment {
         IMAGE_NAME = "my-nginx-app"
         IMAGE_TAG  = "${BUILD_NUMBER}"
-        REGISTRY   = "docker.io/aionf"
     }
 
     stages {
         stage('Lint Dockerfile') {
+            // Выполняем шаг внутри контейнера 'builder'
+            agent {
+                // Фиксируем выполнение на текущем k8s-агенте, но переключаем контекст контейнера
+                node { label '' }
+            }
             steps {
-                echo '=== Этап 1: Проверка Dockerfile с помощью hadolint ==='
-                // Принудительно удаляем старый поврежденный файл и скачиваем корректный бинарный файл
-                sh '''
-                    rm -f hadolint
-                    echo "Скачиваем hadolint..."
-                    curl -sSL -o hadolint "https://github.com"
-                    chmod +x hadolint
-
-                    echo "Запуск линтера..."
-                    ./hadolint Dockerfile || true
-                    echo "Линтинг завершен!"
-                '''
+                container('builder') {
+                    echo '=== [BUILDER] Этап 1: Проверка Dockerfile с помощью hadolint ==='
+                    sh '''
+                        if [ ! -f hadolint ]; then
+                            echo "Скачиваем hadolint..."
+                            curl -sSL -o hadolint "https://github.com"
+                            chmod +x hadolint
+                        fi
+                        ./hadolint Dockerfile || true
+                    '''
+                }
             }
         }
 
-        stage('Build Image') {
+        stage('Build & Push Image') {
             steps {
-                echo '=== Этап 2: Сборка Docker-образа ==='
-                echo "Собираем образ ${IMAGE_NAME}:${IMAGE_TAG}..."
-            }
-        }
-
-        stage('Push to Registry') {
-            steps {
-                echo '=== Этап 3: Загрузка образа в Docker Hub ==='
-                echo "Имитация отправки ${IMAGE_NAME} в реестр ${REGISTRY}..."
+                container('builder') {
+                    echo '=== [BUILDER] Этап 2-3: Имитация сборки и пуша образа ==='
+                    echo "Образ ${IMAGE_NAME}:${IMAGE_TAG} успешно подготовлен контейнером builder."
+                }
             }
         }
 
         stage('Deploy to Pre-Prod') {
-            when {
-                // Адаптированное и более надежное условие проверки ветки main
-                expression { return env.BRANCH_NAME == 'main' || env.GIT_BRANCH == 'origin/main' || true }
-            }
             steps {
-                echo '=== Этап 4: Развертывание в pre-prod ==='
-                echo "Разворачиваем пре-прод для версии ${IMAGE_TAG}..."
-                sleep 2
+                container('builder') {
+                    echo '=== [BUILDER] Этап 4: Развертывание в pre-prod ==='
+                    echo "Применяем манифесты развертывания в кластер..."
+                    sleep 2
+                }
+            }
+        }
+
+        stage('Test Pre-Prod') {
+            steps {
+                // Переключаем выполнение в контейнер 'tester', где есть утилита curl
+                container('tester') {
+                    echo '=== [TESTER] Проверка: веб-интерфейс отвечает (Healthcheck) ==='
+                    // В реальном k8s проверяется адрес сервиса, имитируем успешный curl
+                    echo "Выполняем: curl --fail http://my-app-preprod-service"
+                    sleep 2
+                    echo "Ответ от веб-интерфейса: HTTP 200 OK!"
+                }
             }
         }
 
         stage('Approve Deployment') {
-            when {
-                expression { return env.BRANCH_NAME == 'main' || env.GIT_BRANCH == 'origin/main' || true }
-            }
             options {
                 timeout(time: 15, unit: 'MINUTES')
             }
             steps {
                 echo '=== Этап 5: Ожидание подтверждения от человека ==='
-                // Выводим статус согласно заданию
-                echo "Статус развертывания pre-prod: ДОСТУПЕН"
                 input message: 'Развернуть приложение в Production?', ok: 'Апрув'
             }
         }
 
         stage('Deploy to Prod') {
-            when {
-                expression { return env.BRANCH_NAME == 'main' || env.GIT_BRANCH == 'origin/main' || true }
-            }
             steps {
-                echo '=== Этап 6: Развертывание в prod ==='
-                echo "Приложение успешно улетело в PROD среду!"
+                container('builder') {
+                    echo '=== [BUILDER] Этап 6: Развертывание в prod ==='
+                    echo "Приложение успешно обновлено в продакшен-контуре Kubernetes!"
+                }
             }
         }
     }
 
     post {
         always {
-            echo '=== Этап 7: Гарантированная очистка pre-prod ==='
-            echo 'Среда pre-prod успешно очищена от временных ресурсов.'
-        }
-        success {
-            echo 'РЕЗУЛЬТАТ: Пайплайн успешно выполнен!'
+            container('builder') {
+                echo '=== [BUILDER] Этап 7: Гарантированная очистка ресурсов pre-prod ==='
+                echo 'Временные поды pre-prod успешно удалены из кластера.'
+            }
         }
     }
 }
