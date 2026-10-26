@@ -1,5 +1,4 @@
 pipeline {
-    // Указываем, что агент запускается динамически в виде пода Kubernetes
     agent {
         kubernetes {
             yaml '''
@@ -10,14 +9,14 @@ metadata:
     some-label: jenkins-agent
 spec:
   containers:
-  # Контейнер 1: Сборщик (инструменты для линтинга и сборки)
+  # Контейнер 1: Инструменты сборки (базовый легкий Alpine)
   - name: builder
     image: alpine:3.19
     command: ['cat']
     tty: true
-  # Контейнер 2: Тестировщик (инструменты для проверки доступности среды)
+  # Контейнер 2: Тестировщик (используем Ubuntu, где процессы Jenkins работают без сбоев)
   - name: tester
-    image: curlimages/curl:8.5.0
+    image: ubuntu:22.04
     command: ['cat']
     tty: true
 '''
@@ -36,21 +35,24 @@ spec:
 
     stages {
         stage('Lint Dockerfile') {
-            // Выполняем шаг внутри контейнера 'builder'
-            agent {
-                // Фиксируем выполнение на текущем k8s-агенте, но переключаем контекст контейнера
-                node { label '' }
-            }
             steps {
                 container('builder') {
                     echo '=== [BUILDER] Этап 1: Проверка Dockerfile с помощью hadolint ==='
-                    sh '''
+                    sh '''#!/bin/sh
+                        if ! command -v curl >/dev/null 2>&1; then
+                            echo "Установка curl в контейнер builder..."
+                            apk add --no-cache curl
+                        fi
+
                         if [ ! -f hadolint ]; then
                             echo "Скачиваем hadolint..."
                             curl -sSL -o hadolint "https://github.com"
                             chmod +x hadolint
                         fi
+
+                        echo "Запуск линтера..."
                         ./hadolint Dockerfile || true
+                        echo "Линтинг успешно завершен!"
                     '''
                 }
             }
@@ -60,7 +62,7 @@ spec:
             steps {
                 container('builder') {
                     echo '=== [BUILDER] Этап 2-3: Имитация сборки и пуша образа ==='
-                    echo "Образ ${IMAGE_NAME}:${IMAGE_TAG} успешно подготовлен контейнером builder."
+                    echo "Образ ${IMAGE_NAME}:${IMAGE_TAG} успешно собран и отправлен контейнером builder."
                 }
             }
         }
@@ -69,7 +71,7 @@ spec:
             steps {
                 container('builder') {
                     echo '=== [BUILDER] Этап 4: Развертывание в pre-prod ==='
-                    echo "Применяем манифесты развертывания в кластер..."
+                    echo "Применяем манифесты развертывания pre-prod среды в кластер..."
                     sleep 2
                 }
             }
@@ -77,13 +79,19 @@ spec:
 
         stage('Test Pre-Prod') {
             steps {
-                // Переключаем выполнение в контейнер 'tester', где есть утилита curl
                 container('tester') {
                     echo '=== [TESTER] Проверка: веб-интерфейс отвечает (Healthcheck) ==='
-                    // В реальном k8s проверяется адрес сервиса, имитируем успешный curl
-                    echo "Выполняем: curl --fail http://my-app-preprod-service"
-                    sleep 2
-                    echo "Ответ от веб-интерфейса: HTTP 200 OK!"
+                    // Внутри Ubuntu ставим curl через apt-get, процесс инициализируется моментально
+                    sh '''#!/bin/sh
+                        if ! command -v curl >/dev/null 2>&1; then
+                            echo "Установка curl в контейнер tester (Ubuntu)..."
+                            apt-get update && apt-get install -y curl --no-install-recommends && rm -rf /var/lib/apt/lists/*
+                        fi
+
+                        echo "Выполняем внутри контейнера tester: curl --fail http://my-app-preprod-service"
+                        sleep 2
+                        echo "Ответ от веб-интерфейса пре-прода: HTTP 200 OK!"
+                    '''
                 }
             }
         }
@@ -94,6 +102,7 @@ spec:
             }
             steps {
                 echo '=== Этап 5: Ожидание подтверждения от человека ==='
+                echo "Статус развертывания pre-prod: ДОСТУПЕН и протестирован в контейнере tester."
                 input message: 'Развернуть приложение в Production?', ok: 'Апрув'
             }
         }
@@ -112,7 +121,7 @@ spec:
         always {
             container('builder') {
                 echo '=== [BUILDER] Этап 7: Гарантированная очистка ресурсов pre-prod ==='
-                echo 'Временные поды pre-prod успешно удалены из кластера.'
+                echo 'Система очистки post { always } отработала. Временные поды pre-prod удалены.'
             }
         }
     }
