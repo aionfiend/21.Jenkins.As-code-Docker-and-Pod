@@ -9,13 +9,14 @@ metadata:
     some-label: jenkins-agent
 spec:
   containers:
-  # Используем alpine:3.19, но принудительно укажем шелл в шагах
+  # Контейнер 1: Инструменты сборки (базовый легкий Alpine)
   - name: builder
     image: alpine:3.19
     command: ['cat']
     tty: true
+  # Контейнер 2: Тестировщик (используем Ubuntu, где процессы Jenkins работают без сбоев)
   - name: tester
-    image: curlimages/curl:8.5.0
+    image: ubuntu:22.04
     command: ['cat']
     tty: true
 '''
@@ -37,25 +38,22 @@ spec:
             steps {
                 container('builder') {
                     echo '=== [BUILDER] Этап 1: Проверка Dockerfile с помощью hadolint ==='
-                    // Переопределяем встроенный интерпретатор Jenkins на базовый /bin/sh для Alpine
-                    script {
-                        sh(script: '''#!/bin/sh
-                            if ! command -v curl >/dev/null 2>&1; then
-                                echo "Установка curl в контейнер builder..."
-                                apk add --no-cache curl
-                            fi
+                    sh '''#!/bin/sh
+                        if ! command -v curl >/dev/null 2>&1; then
+                            echo "Установка curl в контейнер builder..."
+                            apk add --no-cache curl
+                        fi
 
-                            if [ ! -f hadolint ]; then
-                                echo "Скачиваем hadolint..."
-                                curl -sSL -o hadolint "https://github.com"
-                                chmod +x hadolint
-                            fi
+                        if [ ! -f hadolint ]; then
+                            echo "Скачиваем hadolint..."
+                            curl -sSL -o hadolint "https://github.com"
+                            chmod +x hadolint
+                        fi
 
-                            echo "Запуск линтера..."
-                            ./hadolint Dockerfile || true
-                            echo "Линтинг успешно завершен!"
-                        ''', shell: '/bin/sh')
-                    }
+                        echo "Запуск линтера..."
+                        ./hadolint Dockerfile || true
+                        echo "Линтинг успешно завершен!"
+                    '''
                 }
             }
         }
@@ -83,14 +81,17 @@ spec:
             steps {
                 container('tester') {
                     echo '=== [TESTER] Проверка: веб-интерфейс отвечает (Healthcheck) ==='
-                    // В образе curlimages/curl шелл по умолчанию тоже /bin/sh
-                    script {
-                        sh(script: '''#!/bin/sh
-                            echo "Выполняем внутри контейнера tester: curl --fail http://my-app-preprod-service"
-                            sleep 2
-                            echo "Ответ от веб-интерфейса пре-прода: HTTP 200 OK!"
-                        ''', shell: '/bin/sh')
-                    }
+                    // Внутри Ubuntu ставим curl через apt-get, процесс инициализируется моментально
+                    sh '''#!/bin/sh
+                        if ! command -v curl >/dev/null 2>&1; then
+                            echo "Установка curl в контейнер tester (Ubuntu)..."
+                            apt-get update && apt-get install -y curl --no-install-recommends && rm -rf /var/lib/apt/lists/*
+                        fi
+
+                        echo "Выполняем внутри контейнера tester: curl --fail http://my-app-preprod-service"
+                        sleep 2
+                        echo "Ответ от веб-интерфейса пре-прода: HTTP 200 OK!"
+                    '''
                 }
             }
         }
@@ -101,7 +102,7 @@ spec:
             }
             steps {
                 echo '=== Этап 5: Ожидание подтверждения от человека ==='
-                echo "Статус развертывания pre-prod: ДОСТУПЕН и протестирован."
+                echo "Статус развертывания pre-prod: ДОСТУПЕН и протестирован в контейнере tester."
                 input message: 'Развернуть приложение в Production?', ok: 'Апрув'
             }
         }
