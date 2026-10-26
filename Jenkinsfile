@@ -1,5 +1,6 @@
 pipeline {
-    agent any
+    agent { label 'built-in' } // или label 'master' в зависимости от версии Jenkins
+
 
     options {
         timeout(time: 1, unit: 'HOURS')
