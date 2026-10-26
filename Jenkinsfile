@@ -19,8 +19,17 @@ pipeline {
         stage('Lint Dockerfile') {
             steps {
                 echo '=== Этап 1: Проверка Dockerfile с помощью hadolint ==='
-                sh 'docker run --rm -i hadolint/hadolint < Dockerfile'
+                // Скачиваем линтер напрямую с GitHub и запускаем его без Docker
+                sh '''
+                    if [ ! -f hadolint ]; then
+                        curl -sSL -o hadolint https://github.com
+                        chmod +x hadolint
+                    fi
+                    ./hadolint Dockerfile
+                '''
             }
+        }
+
         }
 
         stage('Build Image') {
