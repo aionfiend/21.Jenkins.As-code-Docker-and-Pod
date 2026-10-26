@@ -1,5 +1,5 @@
 pipeline {
-    agent { label 'built-in' } // или label 'master' в зависимости от версии Jenkins
+    agent any
 
 
     options {
