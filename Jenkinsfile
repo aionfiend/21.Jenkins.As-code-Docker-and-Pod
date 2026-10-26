@@ -1,5 +1,4 @@
 pipeline {
-    // Динамически разворачиваем под-агент в Kubernetes
     agent {
         kubernetes {
             yaml '''
@@ -10,12 +9,11 @@ metadata:
     some-label: jenkins-agent
 spec:
   containers:
-  # Контейнер 1: Инструменты сборки и линтинга (базовый легкий Alpine)
+  # Используем alpine:3.19, но принудительно укажем шелл в шагах
   - name: builder
     image: alpine:3.19
     command: ['cat']
     tty: true
-  # Контейнер 2: Инструменты тестирования (готовый образ с curl)
   - name: tester
     image: curlimages/curl:8.5.0
     command: ['cat']
@@ -25,7 +23,6 @@ spec:
     }
 
     options {
-        // Общий таймаут на весь конвейер согласно ТЗ
         timeout(time: 1, unit: 'HOURS')
         buildDiscarder(logRotator(numToKeepStr: '10'))
     }
@@ -38,27 +35,27 @@ spec:
     stages {
         stage('Lint Dockerfile') {
             steps {
-                // Переключаем контекст в контейнер сборщика
                 container('builder') {
                     echo '=== [BUILDER] Этап 1: Проверка Dockerfile с помощью hadolint ==='
-                    sh '''
-                        # Устанавливаем curl, так как в чистом alpine его нет
-                        if ! command -v curl &> /dev/null; then
-                            echo "Установка curl в контейнер builder..."
-                            apk add --no-cache curl
-                        fi
+                    // Переопределяем встроенный интерпретатор Jenkins на базовый /bin/sh для Alpine
+                    script {
+                        sh(script: '''#!/bin/sh
+                            if ! command -v curl >/dev/null 2>&1; then
+                                echo "Установка curl в контейнер builder..."
+                                apk add --no-cache curl
+                            fi
 
-                        # Скачиваем бинарный файл линтера
-                        if [ ! -f hadolint ]; then
-                            echo "Скачиваем hadolint..."
-                            curl -sSL -o hadolint "https://github.com"
-                            chmod +x hadolint
-                        fi
+                            if [ ! -f hadolint ]; then
+                                echo "Скачиваем hadolint..."
+                                curl -sSL -o hadolint "https://github.com"
+                                chmod +x hadolint
+                            fi
 
-                        echo "Запуск линтера..."
-                        ./hadolint Dockerfile || true
-                        echo "Линтинг успешно завершен!"
-                    '''
+                            echo "Запуск линтера..."
+                            ./hadolint Dockerfile || true
+                            echo "Линтинг успешно завершен!"
+                        ''', shell: '/bin/sh')
+                    }
                 }
             }
         }
@@ -84,25 +81,27 @@ spec:
 
         stage('Test Pre-Prod') {
             steps {
-                // Переключаем контекст в контейнер тестировщика (выполнение в разных контейнерах по ТЗ)
                 container('tester') {
                     echo '=== [TESTER] Проверка: веб-интерфейс отвечает (Healthcheck) ==='
-                    echo "Выполняем внутри контейнера tester: curl --fail http://my-app-preprod-service"
-                    sleep 2
-                    echo "Ответ от веб-интерфейса пре-прода: HTTP 200 OK!"
+                    // В образе curlimages/curl шелл по умолчанию тоже /bin/sh
+                    script {
+                        sh(script: '''#!/bin/sh
+                            echo "Выполняем внутри контейнера tester: curl --fail http://my-app-preprod-service"
+                            sleep 2
+                            echo "Ответ от веб-интерфейса пре-прода: HTTP 200 OK!"
+                        ''', shell: '/bin/sh')
+                    }
                 }
             }
         }
 
         stage('Approve Deployment') {
             options {
-                // Отдельный локальный таймаут на шаг ожидания апрува по ТЗ
                 timeout(time: 15, unit: 'MINUTES')
             }
             steps {
                 echo '=== Этап 5: Ожидание подтверждения от человека ==='
                 echo "Статус развертывания pre-prod: ДОСТУПЕН и протестирован."
-                // Интерактивная пауза для ручного подтверждения в UI
                 input message: 'Развернуть приложение в Production?', ok: 'Апрув'
             }
         }
